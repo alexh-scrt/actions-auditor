@@ -1,0 +1,29 @@
+# Pre-commit hook declaration for actions-auditor.
+#
+# To use this hook in your project, add the following to your
+# .pre-commit-config.yaml:
+#
+#   repos:
+#     - repo: https://github.com/example/actions-auditor
+#       rev: v0.1.0
+#       hooks:
+#         - id: actions-auditor
+#
+# The hook will automatically scan any staged GitHub Actions workflow
+# files and block the commit if security issues are found.
+
+- id: actions-auditor
+  name: GitHub Actions Security Auditor
+  description: >-
+    Scans GitHub Actions workflow YAML files for common misconfigurations
+    and vulnerabilities including overly permissive token scopes, exposed
+    secrets, unpinned third-party actions, and dangerous trigger patterns.
+  language: python
+  entry: actions-auditor
+  args: ["scan"]
+  files: ^\.github/workflows/.*\.ya?ml$
+  types: [yaml]
+  pass_filenames: false
+  additional_dependencies:
+    - "pyyaml>=6.0"
+    - "rich>=13.0"
