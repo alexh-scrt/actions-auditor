@@ -1,0 +1,100 @@
+# good_workflow.yml
+# A well-configured GitHub Actions workflow used as a negative test case.
+# This workflow follows security best practices and should produce zero findings
+# from the actions_auditor security rules.
+
+name: Good CI Workflow
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+
+# Top-level permissions: explicitly declared with minimal required scopes.
+# AA002: satisfied by declaring permissions explicitly.
+# AA001: satisfied by using read-only scopes (no write-all).
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  build:
+    name: Build and Test
+    runs-on: ubuntu-latest
+
+    steps:
+      # AA005: pinned to a full 40-character commit SHA.
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      # AA005: pinned to a full 40-character commit SHA.
+      - name: Set up Python
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5.3.0
+        with:
+          python-version: "3.11"
+
+      # AA005: pinned to a full 40-character commit SHA.
+      - name: Cache pip dependencies
+        uses: actions/cache@6849a6489940f00c2f30c0fb92c6274307ccb58a  # v4.1.2
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run linter
+        run: |
+          python -m flake8 actions_auditor/ tests/
+
+      - name: Run tests
+        run: |
+          python -m pytest tests/ -v
+
+  lint:
+    name: Code Quality
+    runs-on: ubuntu-latest
+
+    steps:
+      # AA005: pinned to a full 40-character commit SHA.
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      - name: Check formatting
+        run: |
+          python -m pip install black
+          black --check actions_auditor/ tests/
+
+  security-audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    # Job-level permissions: only what this job needs.
+    permissions:
+      contents: read
+
+    steps:
+      # AA005: pinned to a full 40-character commit SHA.
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      # AA003/AA004: secret passed through step-level env variable, not interpolated
+      # directly into the run script.
+      - name: Authenticate with registry
+        run: |
+          echo "$REGISTRY_TOKEN" | docker login ghcr.io -u "$REGISTRY_USER" --password-stdin
+        env:
+          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+          REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
+
+      - name: Run security scan
+        run: |
+          echo "Running security scan..."
+          python -m actions_auditor scan .

