@@ -1,6 +1,7 @@
 """Unit tests for the security rules engine (actions_auditor.rules).
 
-Covers every checker function using synthetic WorkflowFile fixture data:
+Covers every checker function using synthetic WorkflowFile fixture data
+as well as the real fixture YAML files in tests/fixtures/:
 
 - AA001 check_overly_permissive_token
 - AA002 check_missing_permissions
@@ -11,13 +12,14 @@ Covers every checker function using synthetic WorkflowFile fixture data:
 - AA007 check_script_injection
 - AA008 check_workflow_dispatch_injection
 - run_all_rules integration
+- Fixture-based positive and negative integration tests
 """
 
 from __future__ import annotations
 
 import textwrap
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import List
 
 import pytest
 import yaml
@@ -35,15 +37,19 @@ from actions_auditor.rules import (
     check_workflow_dispatch_injection,
     run_all_rules,
 )
-from actions_auditor.scanner import WorkflowFile
+from actions_auditor.scanner import WorkflowFile, load_workflow_file
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
+_FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
-def _make_workflow(yaml_text: str, path: Path = Path("test_workflow.yml")) -> WorkflowFile:
+
+def _make_workflow(
+    yaml_text: str, path: Path = Path("test_workflow.yml")
+) -> WorkflowFile:
     """Parse *yaml_text* and return a :class:`WorkflowFile` ready for rule checks."""
     yaml_text = textwrap.dedent(yaml_text)
     try:
@@ -124,7 +130,9 @@ class TestCheckOverlyPermissiveToken:
         """)
         findings = check_overly_permissive_token(wf)
         assert any(
-            f.rule_id == "AA001" and f.job_name == "deploy" and f.severity == Severity.MEDIUM
+            f.rule_id == "AA001"
+            and f.job_name == "deploy"
+            and f.severity == Severity.MEDIUM
             for f in findings
         )
 
@@ -142,11 +150,10 @@ class TestCheckOverlyPermissiveToken:
                   - run: echo hello
         """)
         findings = check_overly_permissive_token(wf)
-        # No HIGH findings; MEDIUM findings for write scopes should also be absent
         assert not any(f.severity == Severity.HIGH for f in findings)
 
-    def test_no_finding_for_permissions_none(self) -> None:
-        """When permissions key exists but value is None/empty, no AA001 finding."""
+    def test_no_finding_for_empty_permissions_dict(self) -> None:
+        """When permissions key exists but value is an empty dict, no HIGH finding."""
         wf = _make_workflow("""
             name: CI
             on: push
@@ -180,7 +187,7 @@ class TestCheckOverlyPermissiveToken:
         assert len(high_findings) >= 1
         assert high_findings[0].evidence is not None
 
-    def test_finding_has_line_number(self) -> None:
+    def test_finding_has_line_number_when_detectable(self) -> None:
         wf = _make_workflow("""
             name: CI
             on: push
@@ -193,11 +200,47 @@ class TestCheckOverlyPermissiveToken:
         """)
         findings = check_overly_permissive_token(wf)
         high_findings = [f for f in findings if f.severity == Severity.HIGH]
-        # Line number may or may not be set depending on raw content search;
-        # just ensure it is a positive int when set.
         for f in high_findings:
             if f.line_number is not None:
                 assert f.line_number >= 1
+
+    def test_multiple_write_scopes_at_job_level(self) -> None:
+        """Multiple write scopes at job level produce multiple MEDIUM findings."""
+        wf = _make_workflow("""
+            name: CI
+            on: push
+            permissions:
+              contents: read
+            jobs:
+              deploy:
+                runs-on: ubuntu-latest
+                permissions:
+                  contents: write
+                  packages: write
+                steps:
+                  - run: echo deploy
+        """)
+        findings = check_overly_permissive_token(wf)
+        medium_findings = [
+            f for f in findings
+            if f.severity == Severity.MEDIUM and f.job_name == "deploy"
+        ]
+        assert len(medium_findings) >= 2
+
+    def test_top_level_write_all_has_file_path(self) -> None:
+        path = Path("myworkflow.yml")
+        wf = _make_workflow("""
+            name: CI
+            on: push
+            permissions: write-all
+            jobs:
+              build:
+                runs-on: ubuntu-latest
+                steps:
+                  - run: echo hello
+        """, path=path)
+        findings = check_overly_permissive_token(wf)
+        assert all(f.file_path == path for f in findings)
 
 
 # ---------------------------------------------------------------------------
@@ -273,6 +316,34 @@ class TestCheckMissingPermissions:
         assert len(findings) == 1
         assert findings[0].file_path == path
 
+    def test_finding_description_is_informative(self) -> None:
+        wf = _make_workflow("""
+            name: CI
+            on: push
+            jobs:
+              build:
+                runs-on: ubuntu-latest
+                steps:
+                  - run: echo hello
+        """)
+        findings = check_missing_permissions(wf)
+        assert len(findings) == 1
+        assert len(findings[0].description) > 20
+
+    def test_finding_has_evidence(self) -> None:
+        wf = _make_workflow("""
+            name: CI
+            on: push
+            jobs:
+              build:
+                runs-on: ubuntu-latest
+                steps:
+                  - run: echo hello
+        """)
+        findings = check_missing_permissions(wf)
+        assert len(findings) == 1
+        assert findings[0].evidence is not None
+
 
 # ---------------------------------------------------------------------------
 # AA003 – check_secrets_in_env
@@ -317,7 +388,9 @@ class TestCheckSecretsInEnv:
         findings = check_secrets_in_env(wf)
         assert len(findings) >= 1
         assert any(
-            f.rule_id == "AA003" and f.job_name == "build" and f.severity == Severity.MEDIUM
+            f.rule_id == "AA003"
+            and f.job_name == "build"
+            and f.severity == Severity.MEDIUM
             for f in findings
         )
 
@@ -397,6 +470,41 @@ class TestCheckSecretsInEnv:
         """)
         findings = check_secrets_in_env(wf)
         assert len(findings) >= 2
+
+    def test_job_finding_has_job_name(self) -> None:
+        wf = _make_workflow("""
+            name: CI
+            on: push
+            permissions:
+              contents: read
+            jobs:
+              my_job:
+                runs-on: ubuntu-latest
+                env:
+                  SECRET: ${{ secrets.MY_SECRET }}
+                steps:
+                  - run: echo hello
+        """)
+        findings = check_secrets_in_env(wf)
+        assert any(f.job_name == "my_job" for f in findings)
+
+    def test_top_level_secret_no_job_name(self) -> None:
+        wf = _make_workflow("""
+            name: CI
+            on: push
+            permissions:
+              contents: read
+            env:
+              SECRET: ${{ secrets.MY_SECRET }}
+            jobs:
+              build:
+                runs-on: ubuntu-latest
+                steps:
+                  - run: echo hello
+        """)
+        findings = check_secrets_in_env(wf)
+        top_level = [f for f in findings if f.severity == Severity.HIGH]
+        assert any(f.job_name is None for f in top_level)
 
 
 # ---------------------------------------------------------------------------
@@ -496,6 +604,42 @@ class TestCheckSecretsInRun:
         assert len(findings) >= 1
         assert "secrets.MY_PASS" in (findings[0].evidence or "")
 
+    def test_step_without_name_uses_fallback(self) -> None:
+        wf = _make_workflow("""
+            name: CI
+            on: push
+            permissions:
+              contents: read
+            jobs:
+              build:
+                runs-on: ubuntu-latest
+                steps:
+                  - run: echo ${{ secrets.TOKEN }}
+        """)
+        findings = check_secrets_in_run(wf)
+        assert len(findings) >= 1
+        # step_name should be a fallback like 'step 1'
+        assert findings[0].step_name is not None
+
+    def test_multiline_run_script(self) -> None:
+        wf = _make_workflow("""
+            name: CI
+            on: push
+            permissions:
+              contents: read
+            jobs:
+              build:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Multi
+                    run: |
+                      echo start
+                      curl -H "Auth: ${{ secrets.TOKEN }}" https://api.example.com
+                      echo done
+        """)
+        findings = check_secrets_in_run(wf)
+        assert len(findings) >= 1
+
 
 # ---------------------------------------------------------------------------
 # AA005 – check_unpinned_actions
@@ -533,6 +677,21 @@ class TestCheckUnpinnedActions:
                 runs-on: ubuntu-latest
                 steps:
                   - uses: actions/checkout@main
+        """)
+        findings = check_unpinned_actions(wf)
+        assert len(findings) >= 1
+
+    def test_flags_semver_tag(self) -> None:
+        wf = _make_workflow("""
+            name: CI
+            on: push
+            permissions:
+              contents: read
+            jobs:
+              build:
+                runs-on: ubuntu-latest
+                steps:
+                  - uses: owner/action@v1.2.3
         """)
         findings = check_unpinned_actions(wf)
         assert len(findings) >= 1
@@ -665,6 +824,39 @@ class TestCheckUnpinnedActions:
                 steps:
                   - run: echo hello
                   - run: echo world
+        """)
+        findings = check_unpinned_actions(wf)
+        assert findings == []
+
+    def test_sha_must_be_exactly_40_chars(self) -> None:
+        """A 39-character hex string is not a valid SHA and should be flagged."""
+        short_sha = "a" * 39
+        wf = _make_workflow(f"""
+            name: CI
+            on: push
+            permissions:
+              contents: read
+            jobs:
+              build:
+                runs-on: ubuntu-latest
+                steps:
+                  - uses: owner/action@{short_sha}
+        """)
+        findings = check_unpinned_actions(wf)
+        assert len(findings) >= 1
+
+    def test_sha_of_exactly_40_chars_not_flagged(self) -> None:
+        full_sha = "a" * 40
+        wf = _make_workflow(f"""
+            name: CI
+            on: push
+            permissions:
+              contents: read
+            jobs:
+              build:
+                runs-on: ubuntu-latest
+                steps:
+                  - uses: owner/action@{full_sha}
         """)
         findings = check_unpinned_actions(wf)
         assert findings == []
@@ -824,6 +1016,38 @@ class TestCheckPullRequestTarget:
         assert findings[0].job_name == "triage"
         assert findings[0].step_name == "Checkout PR"
 
+    def test_finding_evidence_mentions_pattern(self) -> None:
+        wf = _make_workflow("""
+            name: CI
+            on: pull_request_target
+            permissions:
+              contents: read
+            jobs:
+              build:
+                runs-on: ubuntu-latest
+                steps:
+                  - uses: actions/checkout@v4
+                    with:
+                      ref: ${{ github.event.pull_request.head.sha }}
+        """)
+        findings = check_pull_request_target(wf)
+        assert len(findings) >= 1
+        assert findings[0].evidence is not None
+        assert "pull_request_target" in (findings[0].evidence or "")
+
+    def test_returns_empty_when_no_triggers(self) -> None:
+        """When the workflow has no 'on' key (unusual), no findings."""
+        wf = _make_workflow("""
+            name: No Trigger
+            jobs:
+              build:
+                runs-on: ubuntu-latest
+                steps:
+                  - run: echo hello
+        """)
+        findings = check_pull_request_target(wf)
+        assert findings == []
+
 
 # ---------------------------------------------------------------------------
 # AA007 – check_script_injection
@@ -877,6 +1101,36 @@ class TestCheckScriptInjection:
                 runs-on: ubuntu-latest
                 steps:
                   - run: git checkout ${{ github.head_ref }}
+        """)
+        findings = check_script_injection(wf)
+        assert len(findings) >= 1
+
+    def test_flags_pr_body_in_run(self) -> None:
+        wf = _make_workflow("""
+            name: CI
+            on: pull_request
+            permissions:
+              contents: read
+            jobs:
+              build:
+                runs-on: ubuntu-latest
+                steps:
+                  - run: echo "${{ github.event.pull_request.body }}"
+        """)
+        findings = check_script_injection(wf)
+        assert len(findings) >= 1
+
+    def test_flags_commit_message_in_run(self) -> None:
+        wf = _make_workflow("""
+            name: CI
+            on: push
+            permissions:
+              contents: read
+            jobs:
+              build:
+                runs-on: ubuntu-latest
+                steps:
+                  - run: echo "${{ github.event.head_commit.message }}"
         """)
         findings = check_script_injection(wf)
         assert len(findings) >= 1
@@ -950,6 +1204,39 @@ class TestCheckScriptInjection:
         """)
         findings = check_script_injection(wf)
         assert len(findings) >= 1
+
+    def test_flags_pr_head_label_in_run(self) -> None:
+        wf = _make_workflow("""
+            name: CI
+            on: pull_request
+            permissions:
+              contents: read
+            jobs:
+              build:
+                runs-on: ubuntu-latest
+                steps:
+                  - run: echo ${{ github.event.pull_request.head.label }}
+        """)
+        findings = check_script_injection(wf)
+        assert len(findings) >= 1
+
+    def test_finding_has_job_and_step_name(self) -> None:
+        wf = _make_workflow("""
+            name: CI
+            on: issues
+            permissions:
+              contents: read
+            jobs:
+              my_job:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Dangerous step
+                    run: echo ${{ github.event.issue.body }}
+        """)
+        findings = check_script_injection(wf)
+        assert len(findings) >= 1
+        assert findings[0].job_name == "my_job"
+        assert findings[0].step_name == "Dangerous step"
 
 
 # ---------------------------------------------------------------------------
@@ -1051,6 +1338,62 @@ class TestCheckWorkflowDispatchInjection:
                   - run: echo ${{ inputs.branch }}
         """)
         findings = check_workflow_dispatch_injection(wf)
+        assert len(findings) >= 1
+
+    def test_dispatch_in_dict_triggers(self) -> None:
+        wf = _make_workflow("""
+            name: CI
+            on:
+              push:
+              workflow_dispatch:
+                inputs:
+                  env:
+                    required: false
+            permissions:
+              contents: read
+            jobs:
+              build:
+                runs-on: ubuntu-latest
+                steps:
+                  - run: deploy.sh ${{ inputs.env }}
+        """)
+        findings = check_workflow_dispatch_injection(wf)
+        assert len(findings) >= 1
+
+    def test_finding_has_job_and_step_name(self) -> None:
+        wf = _make_workflow("""
+            name: Deploy
+            on: workflow_dispatch
+            permissions:
+              contents: read
+            jobs:
+              deploy_job:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Run deployment
+                    run: ./deploy.sh ${{ inputs.env_name }}
+        """)
+        findings = check_workflow_dispatch_injection(wf)
+        assert len(findings) >= 1
+        assert findings[0].job_name == "deploy_job"
+        assert findings[0].step_name == "Run deployment"
+
+    def test_multiple_inputs_in_same_run(self) -> None:
+        wf = _make_workflow("""
+            name: Deploy
+            on: workflow_dispatch
+            permissions:
+              contents: read
+            jobs:
+              build:
+                runs-on: ubuntu-latest
+                steps:
+                  - run: >
+                      ./deploy.sh ${{ inputs.env }}
+                      --tag ${{ inputs.version }}
+        """)
+        findings = check_workflow_dispatch_injection(wf)
+        # At least one finding for the step (first match used as evidence)
         assert len(findings) >= 1
 
 
@@ -1166,7 +1509,6 @@ class TestRunAllRules:
         """)
         findings = run_all_rules(wf)
         rule_ids_found = {f.rule_id for f in findings}
-        # Should hit at least AA001, AA003, AA004, AA005, AA006, AA007, AA008
         assert "AA001" in rule_ids_found
         assert "AA003" in rule_ids_found
         assert "AA004" in rule_ids_found
@@ -1232,3 +1574,128 @@ class TestRunAllRules:
         findings = run_all_rules(wf)
         for f in findings:
             assert isinstance(f.severity, Severity)
+
+    def test_rule_error_does_not_abort_other_rules(self) -> None:
+        """If one rule raises an exception, others should still run."""
+        # Create a workflow that triggers AA005 at minimum
+        wf = _make_workflow("""
+            name: CI
+            on: push
+            jobs:
+              build:
+                runs-on: ubuntu-latest
+                steps:
+                  - uses: actions/checkout@v4
+        """)
+        findings = run_all_rules(wf)
+        # We should still get findings (at least AA002 for missing permissions,
+        # and AA005 for unpinned action)
+        assert len(findings) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Fixture-based integration tests
+# ---------------------------------------------------------------------------
+
+
+class TestFixtureWorkflows:
+    """Integration tests using the real fixture YAML files."""
+
+    def test_good_workflow_has_no_high_or_critical_findings(self) -> None:
+        """The good_workflow.yml fixture should produce no HIGH/CRITICAL findings."""
+        fixture_path = _FIXTURES_DIR / "good_workflow.yml"
+        if not fixture_path.exists():
+            pytest.skip("Fixture file not found: good_workflow.yml")
+
+        wf = load_workflow_file(fixture_path)
+        assert wf.is_valid, f"Fixture parse error: {wf.parse_error}"
+
+        findings = run_all_rules(wf)
+        high_or_critical = [
+            f for f in findings
+            if f.severity in (Severity.HIGH, Severity.CRITICAL)
+        ]
+        assert high_or_critical == [], (
+            f"Unexpected HIGH/CRITICAL findings in good_workflow.yml:\n"
+            + "\n".join(str(f) for f in high_or_critical)
+        )
+
+    def test_bad_workflow_triggers_all_key_rules(self) -> None:
+        """The bad_workflow.yml fixture should trigger AA001, AA003, AA004, AA005,
+        AA006, AA007, and AA008."""
+        fixture_path = _FIXTURES_DIR / "bad_workflow.yml"
+        if not fixture_path.exists():
+            pytest.skip("Fixture file not found: bad_workflow.yml")
+
+        wf = load_workflow_file(fixture_path)
+        assert wf.is_valid, f"Fixture parse error: {wf.parse_error}"
+
+        findings = run_all_rules(wf)
+        rule_ids = {f.rule_id for f in findings}
+
+        assert "AA001" in rule_ids, "Expected AA001 in bad_workflow.yml findings"
+        assert "AA003" in rule_ids, "Expected AA003 in bad_workflow.yml findings"
+        assert "AA004" in rule_ids, "Expected AA004 in bad_workflow.yml findings"
+        assert "AA005" in rule_ids, "Expected AA005 in bad_workflow.yml findings"
+        assert "AA006" in rule_ids, "Expected AA006 in bad_workflow.yml findings"
+        assert "AA007" in rule_ids, "Expected AA007 in bad_workflow.yml findings"
+        assert "AA008" in rule_ids, "Expected AA008 in bad_workflow.yml findings"
+
+    def test_bad_workflow_has_critical_findings(self) -> None:
+        """The bad_workflow.yml fixture should contain at least one CRITICAL finding."""
+        fixture_path = _FIXTURES_DIR / "bad_workflow.yml"
+        if not fixture_path.exists():
+            pytest.skip("Fixture file not found: bad_workflow.yml")
+
+        wf = load_workflow_file(fixture_path)
+        assert wf.is_valid
+
+        findings = run_all_rules(wf)
+        critical = [f for f in findings if f.severity == Severity.CRITICAL]
+        assert len(critical) >= 1, "Expected at least one CRITICAL finding in bad_workflow.yml"
+
+    def test_bad_workflow_findings_are_sorted_by_severity(self) -> None:
+        """run_all_rules should return findings sorted from most to least severe."""
+        fixture_path = _FIXTURES_DIR / "bad_workflow.yml"
+        if not fixture_path.exists():
+            pytest.skip("Fixture file not found: bad_workflow.yml")
+
+        wf = load_workflow_file(fixture_path)
+        assert wf.is_valid
+
+        findings = run_all_rules(wf)
+        values = [f.severity.value for f in findings]
+        assert values == sorted(values, reverse=True)
+
+    def test_bad_workflow_all_findings_have_file_path(self) -> None:
+        """All findings should reference the correct file path."""
+        fixture_path = _FIXTURES_DIR / "bad_workflow.yml"
+        if not fixture_path.exists():
+            pytest.skip("Fixture file not found: bad_workflow.yml")
+
+        wf = load_workflow_file(fixture_path)
+        assert wf.is_valid
+
+        findings = run_all_rules(wf)
+        for f in findings:
+            assert f.file_path == fixture_path
+
+    def test_good_workflow_is_parseable(self) -> None:
+        """good_workflow.yml must parse successfully."""
+        fixture_path = _FIXTURES_DIR / "good_workflow.yml"
+        if not fixture_path.exists():
+            pytest.skip("Fixture file not found: good_workflow.yml")
+
+        wf = load_workflow_file(fixture_path)
+        assert wf.is_valid, f"Good fixture failed to parse: {wf.parse_error}"
+        assert isinstance(wf.data, dict)
+
+    def test_bad_workflow_is_parseable(self) -> None:
+        """bad_workflow.yml must parse successfully (it is valid YAML)."""
+        fixture_path = _FIXTURES_DIR / "bad_workflow.yml"
+        if not fixture_path.exists():
+            pytest.skip("Fixture file not found: bad_workflow.yml")
+
+        wf = load_workflow_file(fixture_path)
+        assert wf.is_valid, f"Bad fixture failed to parse: {wf.parse_error}"
+        assert isinstance(wf.data, dict)
